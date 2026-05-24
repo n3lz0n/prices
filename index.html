@@ -26,7 +26,7 @@
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             padding: 40px;
-            max-width: 1200px;
+            max-width: 1400px;
             width: 100%;
         }
 
@@ -44,39 +44,56 @@
             font-size: 1.1em;
         }
 
-        .section-title {
-            color: #333;
-            font-size: 1.8em;
-            margin-top: 40px;
-            margin-bottom: 20px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #667eea;
-        }
-
-        .section-title:first-of-type {
-            margin-top: 0;
-        }
-
-        .price-grid {
+        .crypto-sections {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            grid-template-columns: repeat(3, 1fr);
             gap: 30px;
             margin-bottom: 30px;
         }
 
+        .crypto-section {
+            background: #f9f9f9;
+            border-radius: 15px;
+            padding: 25px;
+            border: 2px solid #f0f0f0;
+        }
+
+        .section-title {
+            color: #333;
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            text-align: center;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #667eea;
+        }
+
+        .crypto-section.ethereum .section-title {
+            border-bottom-color: #627eea;
+        }
+
+        .crypto-section.ripple .section-title {
+            border-bottom-color: #23292f;
+        }
+
+        .price-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 15px;
+        }
+
         .price-card {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 15px;
-            padding: 30px 25px;
+            border-radius: 12px;
+            padding: 20px;
             text-align: center;
             color: white;
-            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
             transition: transform 0.3s ease, box-shadow 0.3s ease;
         }
 
         .price-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 15px 40px rgba(102, 126, 234, 0.6);
+            transform: translateY(-3px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.5);
         }
 
         .price-card.ethereum {
@@ -88,38 +105,37 @@
         }
 
         .currency-code {
-            font-size: 1.1em;
+            font-size: 0.9em;
             font-weight: 600;
-            margin-bottom: 8px;
             opacity: 0.9;
             letter-spacing: 1px;
         }
 
         .price {
-            font-size: 2.2em;
+            font-size: 1.6em;
             font-weight: bold;
-            margin-bottom: 8px;
+            margin: 8px 0;
             word-break: break-word;
         }
 
         .currency-name {
-            font-size: 0.95em;
+            font-size: 0.85em;
             opacity: 0.85;
         }
 
         .loading {
             text-align: center;
             color: #667eea;
-            font-size: 1.2em;
-            padding: 40px 20px;
+            font-size: 1em;
+            padding: 20px;
         }
 
         .spinner {
             display: inline-block;
-            width: 40px;
-            height: 40px;
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #667eea;
+            width: 30px;
+            height: 30px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
             border-radius: 50%;
             animation: spin 1s linear infinite;
             margin-right: 10px;
@@ -133,11 +149,11 @@
         .error {
             background: #fee;
             color: #c33;
-            padding: 15px;
-            border-radius: 10px;
+            padding: 12px;
+            border-radius: 8px;
             text-align: center;
-            margin-bottom: 20px;
             border: 1px solid #fcc;
+            font-size: 0.9em;
         }
 
         .info-bar {
@@ -186,7 +202,13 @@
             100% { opacity: 1; }
         }
 
-        @media (max-width: 600px) {
+        @media (max-width: 1024px) {
+            .crypto-sections {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
             .container {
                 padding: 20px;
             }
@@ -195,17 +217,21 @@
                 font-size: 1.8em;
             }
 
+            .crypto-sections {
+                grid-template-columns: 1fr;
+            }
+
+            .section-title {
+                font-size: 1.2em;
+            }
+
             .price {
-                font-size: 1.6em;
+                font-size: 1.4em;
             }
 
             .info-bar {
                 flex-direction: column;
                 align-items: flex-start;
-            }
-
-            .section-title {
-                font-size: 1.4em;
             }
         }
     </style>
@@ -215,32 +241,40 @@
         <h1>💰 Crypto Price Tracker</h1>
         <p class="subtitle">Real-time prices for Bitcoin, Ethereum & Ripple in USD, AUD, PHP</p>
         
-        <!-- Bitcoin Section -->
-        <h2 class="section-title">₿ Bitcoin</h2>
-        <div id="error-bitcoin" class="error" style="display: none;"></div>
-        <div id="loading-bitcoin" class="loading">
-            <div class="spinner"></div>
-            Loading Bitcoin prices...
-        </div>
-        <div id="prices-bitcoin" class="price-grid" style="display: none;"></div>
+        <div class="crypto-sections">
+            <!-- Bitcoin Section -->
+            <div class="crypto-section bitcoin">
+                <h2 class="section-title">₿ Bitcoin</h2>
+                <div id="error-bitcoin" class="error" style="display: none;"></div>
+                <div id="loading-bitcoin" class="loading">
+                    <div class="spinner"></div>
+                    Loading...
+                </div>
+                <div id="prices-bitcoin" class="price-grid" style="display: none;"></div>
+            </div>
 
-        <!-- Ethereum Section -->
-        <h2 class="section-title">Ξ Ethereum</h2>
-        <div id="error-ethereum" class="error" style="display: none;"></div>
-        <div id="loading-ethereum" class="loading">
-            <div class="spinner"></div>
-            Loading Ethereum prices...
-        </div>
-        <div id="prices-ethereum" class="price-grid" style="display: none;"></div>
+            <!-- Ethereum Section -->
+            <div class="crypto-section ethereum">
+                <h2 class="section-title">Ξ Ethereum</h2>
+                <div id="error-ethereum" class="error" style="display: none;"></div>
+                <div id="loading-ethereum" class="loading">
+                    <div class="spinner"></div>
+                    Loading...
+                </div>
+                <div id="prices-ethereum" class="price-grid" style="display: none;"></div>
+            </div>
 
-        <!-- Ripple Section -->
-        <h2 class="section-title">✕ Ripple (XRP)</h2>
-        <div id="error-ripple" class="error" style="display: none;"></div>
-        <div id="loading-ripple" class="loading">
-            <div class="spinner"></div>
-            Loading Ripple prices...
+            <!-- Ripple Section -->
+            <div class="crypto-section ripple">
+                <h2 class="section-title">✕ Ripple (XRP)</h2>
+                <div id="error-ripple" class="error" style="display: none;"></div>
+                <div id="loading-ripple" class="loading">
+                    <div class="spinner"></div>
+                    Loading...
+                </div>
+                <div id="prices-ripple" class="price-grid" style="display: none;"></div>
+            </div>
         </div>
-        <div id="prices-ripple" class="price-grid" style="display: none;"></div>
 
         <!-- Info Bar -->
         <div id="info-bar" class="info-bar" style="display: none;">
@@ -258,12 +292,6 @@
     </div>
 
     <script>
-        const cryptos = [
-            { id: 'bitcoin', name: 'Bitcoin', symbol: '₿', type: 'bitcoin' },
-            { id: 'ethereum', name: 'Ethereum', symbol: 'Ξ', type: 'ethereum' },
-            { id: 'ripple', name: 'Ripple (XRP)', symbol: '✕', type: 'ripple' }
-        ];
-
         const currencies = [
             { code: 'usd', name: 'US Dollar' },
             { code: 'aud', name: 'Australian Dollar' },
@@ -301,13 +329,8 @@
 
                 const data = await response.json();
 
-                // Update Bitcoin
                 updateCryptoDisplay(data.bitcoin, pricesBitcoin, loadingBitcoin, 'bitcoin');
-
-                // Update Ethereum
                 updateCryptoDisplay(data.ethereum, pricesEthereum, loadingEthereum, 'ethereum');
-
-                // Update Ripple
                 updateCryptoDisplay(data.ripple, pricesRipple, loadingRipple, 'ripple');
 
                 const now = new Date();
@@ -324,17 +347,19 @@
 
             } catch (error) {
                 console.error('Error fetching prices:', error);
-                errorBitcoin.innerHTML = '<div class="error">Failed to fetch prices. Retrying in 5 minutes...</div>';
+                const errorMsg = '<div class="error">Failed to fetch prices. Retrying in 5 minutes...</div>';
+                
+                errorBitcoin.innerHTML = errorMsg;
                 errorBitcoin.style.display = 'block';
                 loadingBitcoin.style.display = 'none';
                 pricesBitcoin.style.display = 'none';
 
-                errorEthereum.innerHTML = '<div class="error">Failed to fetch prices. Retrying in 5 minutes...</div>';
+                errorEthereum.innerHTML = errorMsg;
                 errorEthereum.style.display = 'block';
                 loadingEthereum.style.display = 'none';
                 pricesEthereum.style.display = 'none';
 
-                errorRipple.innerHTML = '<div class="error">Failed to fetch prices. Retrying in 5 minutes...</div>';
+                errorRipple.innerHTML = errorMsg;
                 errorRipple.style.display = 'block';
                 loadingRipple.style.display = 'none';
                 pricesRipple.style.display = 'none';
