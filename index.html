@@ -220,7 +220,7 @@
         ];
 
         let countdownInterval;
-        let timeUntilNextUpdate = 300; // 5 minutes in seconds
+        let timeUntilNextUpdate = 300;
 
         async function fetchPrices() {
             const errorDiv = document.getElementById('error-message');
@@ -232,13 +232,10 @@
             errorDiv.style.display = 'none';
 
             try {
-                const ids = currencies.map(c => c.code).join(',');
-                const response = await fetch(
-                    `https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=${ids}`
-                );
+                const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,aud,php');
 
                 if (!response.ok) {
-                    throw new Error(`API error: ${response.status}`);
+                    throw new Error('API error: ' + response.status);
                 }
 
                 const data = await response.json();
@@ -253,13 +250,7 @@
                         maximumFractionDigits: 2
                     }).format(price);
 
-                    return `
-                        <div class="price-card">
-                            <div class="currency-code">${currency.code.toUpperCase()}</div>
-                            <div class="price">${formattedPrice}</div>
-                            <div class="currency-name">${currency.name}</div>
-                        </div>
-                    `;
+                    return '<div class="price-card"><div class="currency-code">' + currency.code.toUpperCase() + '</div><div class="price">' + formattedPrice + '</div><div class="currency-name">' + currency.name + '</div></div>';
                 }).join('');
 
                 const now = new Date();
@@ -279,10 +270,10 @@
 
             } catch (error) {
                 console.error('Error fetching prices:', error);
-                errorDiv.innerHTML = `<div class="error">⚠️ Failed to fetch Bitcoin prices. Retrying in 5 minutes...</div>`;
+                errorDiv.innerHTML = '<div class="error">Failed to fetch Bitcoin prices. Retrying in 5 minutes...</div>';
                 errorDiv.style.display = 'block';
                 loadingDiv.style.display = 'none';
-                pricesDiv.style.display = 'grid';
+                pricesDiv.style.display = 'none';
                 infoBar.style.display = 'flex';
             }
         }
@@ -292,7 +283,7 @@
                 clearInterval(countdownInterval);
             }
 
-            countdownInterval = setInterval(() => {
+            countdownInterval = setInterval(function() {
                 timeUntilNextUpdate--;
 
                 if (timeUntilNextUpdate <= 0) {
@@ -303,12 +294,12 @@
 
                 const minutes = Math.floor(timeUntilNextUpdate / 60);
                 const seconds = timeUntilNextUpdate % 60;
-                const countdownText = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                const countdownText = minutes + ':' + (seconds < 10 ? '0' : '') + seconds;
                 document.getElementById('countdown').textContent = countdownText;
             }, 1000);
         }
 
-        window.addEventListener('load', () => {
+        window.addEventListener('load', function() {
             fetchPrices();
         });
     </script>
