@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bitcoin Price Tracker</title>
+    <title>Crypto Price Tracker</title>
     <style>
         * {
             margin: 0;
@@ -26,7 +26,7 @@
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             padding: 40px;
-            max-width: 900px;
+            max-width: 1200px;
             width: 100%;
         }
 
@@ -40,8 +40,21 @@
         .subtitle {
             text-align: center;
             color: #666;
-            margin-bottom: 30px;
+            margin-bottom: 40px;
             font-size: 1.1em;
+        }
+
+        .section-title {
+            color: #333;
+            font-size: 1.8em;
+            margin-top: 40px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+
+        .section-title:first-of-type {
+            margin-top: 0;
         }
 
         .price-grid {
@@ -64,6 +77,14 @@
         .price-card:hover {
             transform: translateY(-5px);
             box-shadow: 0 15px 40px rgba(102, 126, 234, 0.6);
+        }
+
+        .price-card.ethereum {
+            background: linear-gradient(135deg, #627eea 0%, #764ba2 100%);
+        }
+
+        .price-card.ripple {
+            background: linear-gradient(135deg, #23292f 0%, #667eea 100%);
         }
 
         .currency-code {
@@ -182,22 +203,46 @@
                 flex-direction: column;
                 align-items: flex-start;
             }
+
+            .section-title {
+                font-size: 1.4em;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>₿ Bitcoin Price Tracker</h1>
-        <p class="subtitle">Real-time prices in USD, AUD, PHP</p>
+        <h1>💰 Crypto Price Tracker</h1>
+        <p class="subtitle">Real-time prices for Bitcoin, Ethereum & Ripple in USD, AUD, PHP</p>
         
-        <div id="error-message"></div>
-        <div id="loading" class="loading">
+        <!-- Bitcoin Section -->
+        <h2 class="section-title">₿ Bitcoin</h2>
+        <div id="error-bitcoin" class="error" style="display: none;"></div>
+        <div id="loading-bitcoin" class="loading">
             <div class="spinner"></div>
             Loading Bitcoin prices...
         </div>
-        
-        <div id="prices" class="price-grid" style="display: none;"></div>
-        
+        <div id="prices-bitcoin" class="price-grid" style="display: none;"></div>
+
+        <!-- Ethereum Section -->
+        <h2 class="section-title">Ξ Ethereum</h2>
+        <div id="error-ethereum" class="error" style="display: none;"></div>
+        <div id="loading-ethereum" class="loading">
+            <div class="spinner"></div>
+            Loading Ethereum prices...
+        </div>
+        <div id="prices-ethereum" class="price-grid" style="display: none;"></div>
+
+        <!-- Ripple Section -->
+        <h2 class="section-title">✕ Ripple (XRP)</h2>
+        <div id="error-ripple" class="error" style="display: none;"></div>
+        <div id="loading-ripple" class="loading">
+            <div class="spinner"></div>
+            Loading Ripple prices...
+        </div>
+        <div id="prices-ripple" class="price-grid" style="display: none;"></div>
+
+        <!-- Info Bar -->
         <div id="info-bar" class="info-bar" style="display: none;">
             <div class="update-status">
                 <span class="status-indicator"></span>
@@ -213,6 +258,12 @@
     </div>
 
     <script>
+        const cryptos = [
+            { id: 'bitcoin', name: 'Bitcoin', symbol: '₿', type: 'bitcoin' },
+            { id: 'ethereum', name: 'Ethereum', symbol: 'Ξ', type: 'ethereum' },
+            { id: 'ripple', name: 'Ripple (XRP)', symbol: '✕', type: 'ripple' }
+        ];
+
         const currencies = [
             { code: 'usd', name: 'US Dollar' },
             { code: 'aud', name: 'Australian Dollar' },
@@ -223,35 +274,41 @@
         let timeUntilNextUpdate = 300;
 
         async function fetchPrices() {
-            const errorDiv = document.getElementById('error-message');
-            const loadingDiv = document.getElementById('loading');
-            const pricesDiv = document.getElementById('prices');
+            const errorBitcoin = document.getElementById('error-bitcoin');
+            const loadingBitcoin = document.getElementById('loading-bitcoin');
+            const pricesBitcoin = document.getElementById('prices-bitcoin');
+
+            const errorEthereum = document.getElementById('error-ethereum');
+            const loadingEthereum = document.getElementById('loading-ethereum');
+            const pricesEthereum = document.getElementById('prices-ethereum');
+
+            const errorRipple = document.getElementById('error-ripple');
+            const loadingRipple = document.getElementById('loading-ripple');
+            const pricesRipple = document.getElementById('prices-ripple');
+
             const infoBar = document.getElementById('info-bar');
 
-            errorDiv.innerHTML = '';
-            errorDiv.style.display = 'none';
+            errorBitcoin.style.display = 'none';
+            errorEthereum.style.display = 'none';
+            errorRipple.style.display = 'none';
 
             try {
-                const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,aud,php');
+                const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,ripple&vs_currencies=usd,aud,php');
 
                 if (!response.ok) {
                     throw new Error('API error: ' + response.status);
                 }
 
                 const data = await response.json();
-                const bitcoinPrices = data.bitcoin;
 
-                pricesDiv.innerHTML = currencies.map(currency => {
-                    const price = bitcoinPrices[currency.code];
-                    const formattedPrice = new Intl.NumberFormat('en-US', {
-                        style: 'currency',
-                        currency: currency.code.toUpperCase(),
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2
-                    }).format(price);
+                // Update Bitcoin
+                updateCryptoDisplay(data.bitcoin, pricesBitcoin, loadingBitcoin, 'bitcoin');
 
-                    return '<div class="price-card"><div class="currency-code">' + currency.code.toUpperCase() + '</div><div class="price">' + formattedPrice + '</div><div class="currency-name">' + currency.name + '</div></div>';
-                }).join('');
+                // Update Ethereum
+                updateCryptoDisplay(data.ethereum, pricesEthereum, loadingEthereum, 'ethereum');
+
+                // Update Ripple
+                updateCryptoDisplay(data.ripple, pricesRipple, loadingRipple, 'ripple');
 
                 const now = new Date();
                 const timeString = now.toLocaleTimeString('en-US', { 
@@ -261,21 +318,47 @@
                 });
                 document.getElementById('timestamp').textContent = timeString;
 
-                loadingDiv.style.display = 'none';
-                pricesDiv.style.display = 'grid';
                 infoBar.style.display = 'flex';
-
                 timeUntilNextUpdate = 300;
                 updateCountdown();
 
             } catch (error) {
                 console.error('Error fetching prices:', error);
-                errorDiv.innerHTML = '<div class="error">Failed to fetch Bitcoin prices. Retrying in 5 minutes...</div>';
-                errorDiv.style.display = 'block';
-                loadingDiv.style.display = 'none';
-                pricesDiv.style.display = 'none';
+                errorBitcoin.innerHTML = '<div class="error">Failed to fetch prices. Retrying in 5 minutes...</div>';
+                errorBitcoin.style.display = 'block';
+                loadingBitcoin.style.display = 'none';
+                pricesBitcoin.style.display = 'none';
+
+                errorEthereum.innerHTML = '<div class="error">Failed to fetch prices. Retrying in 5 minutes...</div>';
+                errorEthereum.style.display = 'block';
+                loadingEthereum.style.display = 'none';
+                pricesEthereum.style.display = 'none';
+
+                errorRipple.innerHTML = '<div class="error">Failed to fetch prices. Retrying in 5 minutes...</div>';
+                errorRipple.style.display = 'block';
+                loadingRipple.style.display = 'none';
+                pricesRipple.style.display = 'none';
+
                 infoBar.style.display = 'flex';
             }
+        }
+
+        function updateCryptoDisplay(prices, container, loader, cryptoType) {
+            container.innerHTML = currencies.map(currency => {
+                const price = prices[currency.code];
+                const formattedPrice = new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: currency.code.toUpperCase(),
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                }).format(price);
+
+                const cardClass = cryptoType === 'ethereum' ? 'ethereum' : cryptoType === 'ripple' ? 'ripple' : '';
+                return '<div class="price-card ' + cardClass + '"><div class="currency-code">' + currency.code.toUpperCase() + '</div><div class="price">' + formattedPrice + '</div><div class="currency-name">' + currency.name + '</div></div>';
+            }).join('');
+
+            loader.style.display = 'none';
+            container.style.display = 'grid';
         }
 
         function updateCountdown() {
