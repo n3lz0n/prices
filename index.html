@@ -107,14 +107,6 @@
             border-bottom: 3px solid #667eea;
         }
 
-        .crypto-section.ethereum .section-title {
-            border-bottom-color: #627eea;
-        }
-
-        .crypto-section.ripple .section-title {
-            border-bottom-color: #23292f;
-        }
-
         .price-grid {
             display: grid;
             grid-template-columns: 1fr;
@@ -134,14 +126,6 @@
         .price-card:hover {
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(102, 126, 234, 0.5);
-        }
-
-        .price-card.ethereum {
-            background: linear-gradient(135deg, #627eea 0%, #764ba2 100%);
-        }
-
-        .price-card.ripple {
-            background: linear-gradient(135deg, #23292f 0%, #667eea 100%);
         }
 
         .currency-code {
@@ -438,9 +422,9 @@
                     };
                 }
 
-                updateCryptoDisplay(data.bitcoin, pricesBitcoin, loadingBitcoin, 'bitcoin');
-                updateCryptoDisplay(data.ethereum, pricesEthereum, loadingEthereum, 'ethereum');
-                updateCryptoDisplay(data.ripple, pricesRipple, loadingRipple, 'ripple');
+                updateCryptoDisplay(data.bitcoin, pricesBitcoin, loadingBitcoin);
+                updateCryptoDisplay(data.ethereum, pricesEthereum, loadingEthereum);
+                updateCryptoDisplay(data.ripple, pricesRipple, loadingRipple);
 
                 const now = new Date();
                 const timeString = now.toLocaleTimeString('en-US', { 
@@ -477,7 +461,7 @@
             }
         }
 
-        function updateCryptoDisplay(prices, container, loader, cryptoType) {
+        function updateCryptoDisplay(prices, container, loader) {
             container.innerHTML = currencies.map(currency => {
                 const price = prices[currency.code];
                 const formattedPrice = new Intl.NumberFormat('en-US', {
@@ -487,8 +471,7 @@
                     maximumFractionDigits: 2
                 }).format(price);
 
-                const cardClass = cryptoType === 'ethereum' ? 'ethereum' : cryptoType === 'ripple' ? 'ripple' : '';
-                return '<div class="price-card ' + cardClass + '"><div class="currency-code">' + currency.code.toUpperCase() + '</div><div class="price">' + formattedPrice + '</div><div class="currency-name">' + currency.name + '</div></div>';
+                return '<div class="price-card"><div class="currency-code">' + currency.code.toUpperCase() + '</div><div class="price">' + formattedPrice + '</div><div class="currency-name">' + currency.name + '</div></div>';
             }).join('');
 
             loader.style.display = 'none';
