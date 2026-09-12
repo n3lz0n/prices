@@ -1,0 +1,1065 @@
+#!/usr/bin/env python3
+"""
+XRP/USDT Stochastic RSI Backtester — realistic research version
+
+Strategy
+--------
+BUY:
+    Stoch RSI %K crosses UP through the oversold level.
+
+SELL:
+    1. Take profit is hit intrabar, OR
+    2. Stop loss is hit intrabar, OR
+    3. %K crosses DOWN through the overbought level.
+       Indicator exits execute at the NEXT candle open.
+
+Portfolio model
+---------------
+- Spot only; no leverage.
+- Position size is a percentage of available cash.
+- Entry/exit fees are charged.
+- Slippage is charged on both sides.
+- Signals use CLOSED candles only.
+- Indicator signals execute at the NEXT candle OPEN.
+- TP/SL use the candle's High/Low.
+- If TP and SL are both touched in one OHLC candle, the conservative
+  assumption is that STOP LOSS happened first (OHLC does not reveal
+  intrabar order).
+- A remaining position is closed at the final close.
+
+Data
+----
+For genuine XRP/USDT testing, this script uses CCXT exchange OHLCV.
+The default exchange is Kraken because it provides public OHLCV data.
+
+Install:
+    pip install ccxt pandas numpy
+
+Run:
+    python xrp_stoch_rsi_backtester.py
+
+The script also saves:
+    backtest_results.json
+    trades.csv
+    equity_curve.csv
+
+NOTE:
+Backtesting is research, not proof of future profitability. Exchange fees,
+slippage, liquidity, and historical candle quality can materially change
+results.
+"""
+
+import json
+import math
+import statistics
+import time
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import ccxt
+    import pandas as pd
+    import numpy as np
+except ImportError:
+    print("Installing required packages...")
+    import subprocess
+    subprocess.check_call(["pip", "install", "ccxt", "pandas", "numpy"])
+    import ccxt
+    import pandas as pd
+    import numpy as np
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+@dataclass
+class BacktestConfig:
+    exchange_id: str = "kraken"
+    symbol: str = "XRP/USDT"
+    timeframe: str = "4h"
+    years: float = 3.0
+
+    starting_capital: float = 1000.0
+
+    # Allocate this fraction of available cash to each trade.
+    position_size_pct: float = 0.10
+
+    # Ignore dust-sized trades.
+    min_trade_value: float = 5.0
+
+    # Stochastic RSI
+    stoch_rsi_period: int = 14
+    k_smooth: int = 3
+    d_smooth: int = 3
+    oversold: float = 20.0
+    overbought: float = 80.0
+
+    # Risk management
+    take_profit_pct: float = 5.0
+    stop_loss_pct: float = 3.0
+
+    # Trading frictions
+    fee_pct: float = 0.10       # 0.10% per side
+    slippage_pct: float = 0.05  # 0.05% per side
+
+    # Conservative same-candle TP/SL assumption.
+    stop_before_target_if_both_hit: bool = True
+
+    # Benchmark
+    include_buy_and_hold: bool = True
+
+    # Data quality
+    max_gap_multiple: float = 2.5
+
+
+@dataclass
+class Position:
+    entry_date: pd.Timestamp
+    entry_price: float
+    quantity: float
+    entry_notional: float
+    entry_fee: float
+    entry_stoch_k: float
+
+
+# ============================================================
+# INDICATORS
+# ============================================================
+
+def calculate_rsi(prices: np.ndarray, period: int = 14) -> np.ndarray:
+    """Wilder RSI on a 0–100 scale."""
+    prices = np.asarray(prices, dtype=float)
+
+    if len(prices) < period + 1:
+        return np.full(len(prices), np.nan)
+
+    deltas = np.diff(prices)
+    gains = np.maximum(deltas, 0.0)
+    losses = np.maximum(-deltas, 0.0)
+
+    avg_gain = float(np.mean(gains[:period]))
+    avg_loss = float(np.mean(losses[:period]))
+
+    rsi = np.full(len(prices), np.nan)
+
+    if avg_loss == 0:
+        rsi[period] = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        rsi[period] = 100.0 - 100.0 / (1.0 + rs)
+
+    for i in range(period + 1, len(prices)):
+        avg_gain = ((avg_gain * (period - 1)) + gains[i - 1]) / period
+        avg_loss = ((avg_loss * (period - 1)) + losses[i - 1]) / period
+
+        if avg_loss == 0:
+            rsi[i] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi[i] = 100.0 - 100.0 / (1.0 + rs)
+
+    return rsi
+
+
+def calculate_stochastic_rsi(
+    prices: np.ndarray,
+    period: int = 14,
+    k_smooth: int = 3,
+    d_smooth: int = 3,
+):
+    """
+    Stochastic RSI %K and %D.
+
+    Formula:
+        StochRSI = (RSI - lowest RSI) / (highest RSI - lowest RSI) * 100
+    """
+    rsi = calculate_rsi(prices, period)
+    s = pd.Series(rsi, dtype=float)
+
+    rsi_min = s.rolling(period, min_periods=period).min()
+    rsi_max = s.rolling(period, min_periods=period).max()
+
+    denominator = rsi_max - rsi_min
+
+    stoch = pd.Series(np.nan, index=s.index, dtype=float)
+    valid = denominator != 0
+    stoch.loc[valid] = ((s.loc[valid] - rsi_min.loc[valid])
+                        / denominator.loc[valid]) * 100.0
+
+    # If RSI has been flat for the entire lookback, use neutral 50.
+    stoch.loc[(denominator == 0) & s.notna()] = 50.0
+
+    k = stoch.rolling(k_smooth, min_periods=k_smooth).mean()
+    d = k.rolling(d_smooth, min_periods=d_smooth).mean()
+
+    return k.to_numpy(), d.to_numpy()
+
+
+# ============================================================
+# DATA
+# ============================================================
+
+TIMEFRAME_MS = {
+    "1m": 60_000,
+    "3m": 180_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "2h": 7_200_000,
+    "4h": 14_400_000,
+    "6h": 21_600_000,
+    "8h": 28_800_000,
+    "12h": 43_200_000,
+    "1d": 86_400_000,
+}
+
+
+def create_exchange(exchange_id: str):
+    """Create a public CCXT exchange client."""
+    if not hasattr(ccxt, exchange_id):
+        raise ValueError(f"Unknown CCXT exchange: {exchange_id}")
+
+    exchange_class = getattr(ccxt, exchange_id)
+
+    exchange = exchange_class({
+        "enableRateLimit": True,
+        "timeout": 30_000,
+    })
+
+    exchange.load_markets()
+    return exchange
+
+
+def fetch_ohlcv_paginated(config: BacktestConfig) -> pd.DataFrame:
+    """
+    Fetch historical OHLCV in pages.
+
+    CCXT exchanges normally limit the number of candles returned per request,
+    so pagination is required for multi-year 4h testing.
+    """
+    if config.timeframe not in TIMEFRAME_MS:
+        raise ValueError(
+            f"Unsupported timeframe '{config.timeframe}'. "
+            f"Choose from: {', '.join(TIMEFRAME_MS)}"
+        )
+
+    exchange = create_exchange(config.exchange_id)
+
+    if config.symbol not in exchange.markets:
+        raise ValueError(
+            f"{config.symbol} is not available on {config.exchange_id}."
+        )
+
+    if not exchange.has.get("fetchOHLCV"):
+        raise RuntimeError(
+            f"{config.exchange_id} does not expose OHLCV through CCXT."
+        )
+
+    timeframe_ms = TIMEFRAME_MS[config.timeframe]
+    now_ms = exchange.milliseconds()
+
+    # Request a little extra history for indicator warm-up.
+    warmup_candles = (
+        config.stoch_rsi_period
+        + config.k_smooth
+        + config.d_smooth
+        + 20
+    )
+
+    total_ms = int(config.years * 365.25 * 24 * 3600 * 1000)
+    since_ms = now_ms - total_ms - warmup_candles * timeframe_ms
+
+    print("\n📥 Downloading exchange OHLCV...")
+    print(f"   Exchange:   {config.exchange_id}")
+    print(f"   Symbol:     {config.symbol}")
+    print(f"   Timeframe:  {config.timeframe}")
+    print(f"   Requested:  ~{config.years:.2f} years")
+
+    all_rows = []
+    cursor = since_ms
+    page = 0
+
+    while cursor < now_ms:
+        page += 1
+
+        try:
+            batch = exchange.fetch_ohlcv(
+                config.symbol,
+                timeframe=config.timeframe,
+                since=cursor,
+                limit=1000,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"OHLCV request failed on page {page}: {exc}"
+            ) from exc
+
+        if not batch:
+            break
+
+        all_rows.extend(batch)
+
+        last_ts = int(batch[-1][0])
+        next_cursor = last_ts + timeframe_ms
+
+        if next_cursor <= cursor:
+            break
+
+        cursor = next_cursor
+
+        print(
+            f"\r   Page {page:>3} | candles collected: "
+            f"{len(all_rows):,}",
+            end="",
+            flush=True,
+        )
+
+        # CCXT's rate limiter normally handles this, but a tiny pause
+        # keeps aggressive public endpoints happier.
+        time.sleep(max(exchange.rateLimit / 1000.0, 0.05))
+
+        if last_ts >= now_ms - timeframe_ms:
+            break
+
+    print()
+
+    if not all_rows:
+        raise RuntimeError("Exchange returned no OHLCV data.")
+
+    df = pd.DataFrame(
+        all_rows,
+        columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"],
+    )
+
+    df["Date"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True)
+    df.set_index("Date", inplace=True)
+    df.drop(columns=["Timestamp"], inplace=True)
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
+    df = df[~df.index.duplicated(keep="first")]
+    df.sort_index(inplace=True)
+
+    # Keep only requested backtest period + warmup.
+    requested_start = pd.Timestamp(
+        datetime.now(timezone.utc)
+    ) - pd.Timedelta(days=365.25 * config.years)
+
+    df = df[df.index >= requested_start - pd.Timedelta(
+        milliseconds=warmup_candles * timeframe_ms
+    )]
+
+    if len(df) < 100:
+        raise RuntimeError(
+            f"Only {len(df)} candles available; not enough for a meaningful backtest."
+        )
+
+    return validate_data(df, config)
+
+
+def validate_data(df: pd.DataFrame, config: BacktestConfig) -> pd.DataFrame:
+    """Run basic OHLCV integrity checks."""
+    if (df[["Open", "High", "Low", "Close"]] <= 0).any().any():
+        raise ValueError("Found zero/negative OHLC prices.")
+
+    bad_high = df["High"] < df[["Open", "Close", "Low"]].max(axis=1)
+    bad_low = df["Low"] > df[["Open", "Close", "High"]].min(axis=1)
+
+    if bad_high.any() or bad_low.any():
+        raise ValueError("Found invalid OHLC candles.")
+
+    expected_ms = TIMEFRAME_MS[config.timeframe]
+    diffs = df.index.to_series().diff().dropna().dt.total_seconds() * 1000
+    large_gaps = diffs[diffs > expected_ms * config.max_gap_multiple]
+
+    print(f"✅ Validated {len(df):,} candles.")
+
+    if not large_gaps.empty:
+        print(
+            f"⚠️  Warning: {len(large_gaps)} large data gaps detected. "
+            "Results may be affected."
+        )
+    else:
+        print("✅ No major data gaps detected.")
+
+    print(f"   First: {df.index[0]}")
+    print(f"   Last:  {df.index[-1]}")
+
+    return df
+
+
+# ============================================================
+# EXECUTION / FEES
+# ============================================================
+
+def buy_price(raw_price: float, slippage_pct: float) -> float:
+    return raw_price * (1.0 + slippage_pct / 100.0)
+
+
+def sell_price(raw_price: float, slippage_pct: float) -> float:
+    return raw_price * (1.0 - slippage_pct / 100.0)
+
+
+def fee(notional: float, fee_pct: float) -> float:
+    return notional * fee_pct / 100.0
+
+
+# ============================================================
+# METRICS
+# ============================================================
+
+def max_drawdown(equity: pd.Series):
+    running_max = equity.cummax()
+    dd = equity / running_max - 1.0
+    return float(dd.min()), dd
+
+
+def annualized_sharpe(returns: pd.Series, periods_per_year: float):
+    returns = returns.dropna()
+    if len(returns) < 2:
+        return 0.0
+
+    std = returns.std(ddof=1)
+    if std == 0 or pd.isna(std):
+        return 0.0
+
+    return float(
+        (returns.mean() / std) * math.sqrt(periods_per_year)
+    )
+
+
+def annualized_sortino(returns: pd.Series, periods_per_year: float):
+    returns = returns.dropna()
+    if len(returns) < 2:
+        return 0.0
+
+    downside = returns[returns < 0]
+
+    if len(downside) < 2:
+        return 0.0
+
+    downside_std = downside.std(ddof=1)
+    if downside_std == 0 or pd.isna(downside_std):
+        return 0.0
+
+    return float(
+        (returns.mean() / downside_std) * math.sqrt(periods_per_year)
+    )
+
+
+def cagr(start: float, end: float, years: float):
+    if start <= 0 or end <= 0 or years <= 0:
+        return 0.0
+    return (end / start) ** (1.0 / years) - 1.0
+
+
+def streaks(profits):
+    best_win = best_loss = 0
+    current_win = current_loss = 0
+
+    for p in profits:
+        if p > 0:
+            current_win += 1
+            current_loss = 0
+            best_win = max(best_win, current_win)
+        elif p < 0:
+            current_loss += 1
+            current_win = 0
+            best_loss = max(best_loss, current_loss)
+        else:
+            current_win = current_loss = 0
+
+    return best_win, best_loss
+
+
+def yearly_returns(equity: pd.Series):
+    daily = equity.resample("1D").last().dropna()
+
+    if daily.empty:
+        return {}
+
+    result = {}
+
+    # Calendar-year return uses the last equity value of the previous year
+    # where available, rather than pretending Jan 1 started at the year's
+    # first observed value.
+    for year in sorted(daily.index.year.unique()):
+        current = daily[daily.index.year == year]
+
+        previous = daily[daily.index.year < year]
+        start_value = (
+            float(previous.iloc[-1])
+            if not previous.empty
+            else float(current.iloc[0])
+        )
+
+        end_value = float(current.iloc[-1])
+        result[str(year)] = (
+            (end_value / start_value) - 1.0
+        ) * 100.0
+
+    return result
+
+
+def buy_and_hold_return(df: pd.DataFrame, starting_capital: float):
+    first = float(df["Close"].iloc[0])
+    last = float(df["Close"].iloc[-1])
+
+    if first <= 0:
+        return 0.0
+
+    return ((last / first) - 1.0) * 100.0
+
+
+# ============================================================
+# BACKTEST ENGINE
+# ============================================================
+
+def backtest(config: BacktestConfig):
+    df = fetch_ohlcv_paginated(config)
+
+    # Calculate indicators using the entire historical series.
+    prices = df["Close"].to_numpy(dtype=float)
+
+    stoch_k, stoch_d = calculate_stochastic_rsi(
+        prices,
+        period=config.stoch_rsi_period,
+        k_smooth=config.k_smooth,
+        d_smooth=config.d_smooth,
+    )
+
+    df["StochK"] = stoch_k
+    df["StochD"] = stoch_d
+
+    # Only use requested period after warmup.
+    requested_start = pd.Timestamp(
+        datetime.now(timezone.utc)
+    ) - pd.Timedelta(days=365.25 * config.years)
+
+    df = df[df.index >= requested_start].copy()
+
+    if len(df) < 100:
+        raise RuntimeError("Not enough candles after warmup.")
+
+    cash = float(config.starting_capital)
+    position = None
+
+    # A signal is created at candle close and executed at the next open.
+    pending_entry = None
+    pending_indicator_exit = False
+
+    trades = []
+    equity_values = []
+
+    # Start after enough indicator history exists.
+    first_i = max(
+        config.stoch_rsi_period * 2,
+        config.stoch_rsi_period
+        + config.k_smooth
+        + config.d_smooth
+        + 2,
+    )
+
+    for i in range(first_i, len(df)):
+        idx = df.index[i]
+        row = df.iloc[i]
+
+        o = float(row["Open"])
+        h = float(row["High"])
+        l = float(row["Low"])
+        c = float(row["Close"])
+
+        k_prev = float(df["StochK"].iloc[i - 1])
+        k_now = float(df["StochK"].iloc[i])
+
+        # --------------------------------------------------------
+        # 1. Execute pending indicator exit at current OPEN.
+        # --------------------------------------------------------
+        if position is not None and pending_indicator_exit:
+            execution = sell_price(o, config.slippage_pct)
+            gross_exit = execution * position.quantity
+            exit_fee = fee(gross_exit, config.fee_pct)
+            net_exit = gross_exit - exit_fee
+
+            total_cost = position.entry_notional + position.entry_fee
+            net_profit = net_exit - total_cost
+
+            trades.append({
+                "entry_date": position.entry_date.isoformat(),
+                "exit_date": idx.isoformat(),
+                "entry_price": position.entry_price,
+                "exit_price": execution,
+                "quantity": position.quantity,
+                "entry_notional": position.entry_notional,
+                "entry_fee": position.entry_fee,
+                "exit_notional": gross_exit,
+                "exit_fee": exit_fee,
+                "net_profit_usdt": net_profit,
+                "return_percent": (net_profit / total_cost) * 100.0,
+                "reason": "Stoch RSI bearish cross",
+                "duration_hours": (
+                    idx - position.entry_date
+                ).total_seconds() / 3600.0,
+            })
+
+            cash += net_exit
+            position = None
+            pending_indicator_exit = False
+
+        # --------------------------------------------------------
+        # 2. Execute pending entry at current OPEN.
+        # --------------------------------------------------------
+        if position is None and pending_entry is not None:
+            entry_price = buy_price(o, config.slippage_pct)
+
+            # Position sizing is based on actual available cash.
+            desired_notional = cash * config.position_size_pct
+
+            # Leave enough cash for entry fee.
+            max_affordable = cash / (
+                1.0 + config.fee_pct / 100.0
+            )
+
+            notional = min(desired_notional, max_affordable)
+
+            if notional >= config.min_trade_value:
+                quantity = notional / entry_price
+                entry_fee = fee(notional, config.fee_pct)
+
+                cash -= notional + entry_fee
+
+                position = Position(
+                    entry_date=idx,
+                    entry_price=entry_price,
+                    quantity=quantity,
+                    entry_notional=notional,
+                    entry_fee=entry_fee,
+                    entry_stoch_k=pending_entry["stoch_k"],
+                )
+
+            pending_entry = None
+
+        # --------------------------------------------------------
+        # 3. Intrabar TP / SL.
+        # --------------------------------------------------------
+        if position is not None:
+            stop = position.entry_price * (
+                1.0 - config.stop_loss_pct / 100.0
+            )
+            target = position.entry_price * (
+                1.0 + config.take_profit_pct / 100.0
+            )
+
+            stop_hit = l <= stop
+            target_hit = h >= target
+
+            exit_reason = None
+            raw_exit = None
+
+            if stop_hit and target_hit:
+                if config.stop_before_target_if_both_hit:
+                    exit_reason = "Stop Loss (same candle as TP)"
+                    raw_exit = stop
+                else:
+                    exit_reason = "Take Profit (same candle as SL)"
+                    raw_exit = target
+            elif stop_hit:
+                exit_reason = "Stop Loss"
+                raw_exit = stop
+            elif target_hit:
+                exit_reason = "Take Profit"
+                raw_exit = target
+
+            if raw_exit is not None:
+                execution = sell_price(
+                    raw_exit, config.slippage_pct
+                )
+                gross_exit = execution * position.quantity
+                exit_fee = fee(gross_exit, config.fee_pct)
+                net_exit = gross_exit - exit_fee
+
+                total_cost = position.entry_notional + position.entry_fee
+                net_profit = net_exit - total_cost
+
+                trades.append({
+                    "entry_date": position.entry_date.isoformat(),
+                    "exit_date": idx.isoformat(),
+                    "entry_price": position.entry_price,
+                    "exit_price": execution,
+                    "quantity": position.quantity,
+                    "entry_notional": position.entry_notional,
+                    "entry_fee": position.entry_fee,
+                    "exit_notional": gross_exit,
+                    "exit_fee": exit_fee,
+                    "net_profit_usdt": net_profit,
+                    "return_percent": (net_profit / total_cost) * 100.0,
+                    "reason": exit_reason,
+                    "duration_hours": (
+                        idx - position.entry_date
+                    ).total_seconds() / 3600.0,
+                })
+
+                cash += net_exit
+                position = None
+                pending_indicator_exit = False
+
+        # --------------------------------------------------------
+        # 4. Mark portfolio to market at CURRENT CLOSE.
+        # --------------------------------------------------------
+        if position is None:
+            equity = cash
+        else:
+            equity = cash + position.quantity * c
+
+        equity_values.append((idx, equity))
+
+        # --------------------------------------------------------
+        # 5. Generate signals ONLY after candle CLOSE.
+        #    They execute at the NEXT candle OPEN.
+        # --------------------------------------------------------
+        if i < len(df) - 1:
+            if position is None and pending_entry is None:
+                bullish_cross = (
+                    not np.isnan(k_prev)
+                    and not np.isnan(k_now)
+                    and k_prev >= config.oversold
+                    and k_now < config.oversold
+                )
+
+                if bullish_cross:
+                    pending_entry = {
+                        "signal_date": idx,
+                        "stoch_k": k_now,
+                    }
+
+            elif position is not None:
+                bearish_cross = (
+                    not np.isnan(k_prev)
+                    and not np.isnan(k_now)
+                    and k_prev >= config.overbought
+                    and k_now < config.overbought
+                )
+
+                if bearish_cross:
+                    pending_indicator_exit = True
+
+    # ------------------------------------------------------------
+    # 6. Close remaining position at final close.
+    # ------------------------------------------------------------
+    if position is not None:
+        idx = df.index[-1]
+        raw_exit = float(df["Close"].iloc[-1])
+        execution = sell_price(raw_exit, config.slippage_pct)
+
+        gross_exit = execution * position.quantity
+        exit_fee = fee(gross_exit, config.fee_pct)
+        net_exit = gross_exit - exit_fee
+
+        total_cost = position.entry_notional + position.entry_fee
+        net_profit = net_exit - total_cost
+
+        trades.append({
+            "entry_date": position.entry_date.isoformat(),
+            "exit_date": idx.isoformat(),
+            "entry_price": position.entry_price,
+            "exit_price": execution,
+            "quantity": position.quantity,
+            "entry_notional": position.entry_notional,
+            "entry_fee": position.entry_fee,
+            "exit_notional": gross_exit,
+            "exit_fee": exit_fee,
+            "net_profit_usdt": net_profit,
+            "return_percent": (net_profit / total_cost) * 100.0,
+            "reason": "End of backtest",
+            "duration_hours": (
+                idx - position.entry_date
+            ).total_seconds() / 3600.0,
+        })
+
+        cash += net_exit
+        position = None
+
+        # Update final equity to actual realized cash.
+        if equity_values:
+            equity_values[-1] = (idx, cash)
+
+    equity = pd.Series(
+        data=[x[1] for x in equity_values],
+        index=pd.DatetimeIndex([x[0] for x in equity_values]),
+        dtype=float,
+        name="Equity",
+    )
+
+    # ------------------------------------------------------------
+    # Metrics
+    # ------------------------------------------------------------
+    starting = config.starting_capital
+    final = float(equity.iloc[-1])
+
+    net_profit = final - starting
+    roi = (net_profit / starting) * 100.0
+
+    actual_years = (
+        (equity.index[-1] - equity.index[0]).total_seconds()
+        / (365.25 * 24 * 3600)
+    )
+
+    cagr_pct = cagr(starting, final, actual_years) * 100.0
+
+    dd_pct, drawdown = max_drawdown(equity)
+
+    # 4-hour bars = approximately 6 observations/day.
+    periods_per_year = 365.25 * 24 / 4
+
+    returns = equity.pct_change().replace(
+        [np.inf, -np.inf], np.nan
+    ).dropna()
+
+    sharpe = annualized_sharpe(
+        returns, periods_per_year
+    )
+    sortino = annualized_sortino(
+        returns, periods_per_year
+    )
+
+    profits = [
+        float(t["net_profit_usdt"])
+        for t in trades
+    ]
+
+    wins = [p for p in profits if p > 0]
+    losses = [p for p in profits if p < 0]
+
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+
+    profit_factor = (
+        gross_profit / gross_loss
+        if gross_loss > 0
+        else float("inf")
+    )
+
+    expectancy = (
+        statistics.mean(profits)
+        if profits else 0.0
+    )
+
+    win_rate = (
+        len(wins) / len(profits) * 100.0
+        if profits else 0.0
+    )
+
+    avg_win = statistics.mean(wins) if wins else 0.0
+    avg_loss = statistics.mean(losses) if losses else 0.0
+
+    best_trade = max(profits) if profits else 0.0
+    worst_trade = min(profits) if profits else 0.0
+
+    win_streak, loss_streak = streaks(profits)
+
+    total_fees = sum(
+        t["entry_fee"] + t["exit_fee"]
+        for t in trades
+    )
+
+    avg_duration = (
+        statistics.mean([
+            t["duration_hours"]
+            for t in trades
+        ])
+        if trades else 0.0
+    )
+
+    yearly = yearly_returns(equity)
+
+    bh_return = (
+        buy_and_hold_return(df, starting)
+        if config.include_buy_and_hold
+        else None
+    )
+
+    calmar = (
+        (cagr_pct / 100.0) / abs(dd_pct)
+        if dd_pct < 0
+        else float("inf")
+    )
+
+    metrics = {
+        "starting_capital": starting,
+        "final_capital": final,
+        "net_profit_usdt": net_profit,
+        "roi_percent": roi,
+        "cagr_percent": cagr_pct,
+        "max_drawdown_percent": dd_pct * 100.0,
+
+        "total_trades": len(trades),
+        "winning_trades": len(wins),
+        "losing_trades": len(losses),
+        "win_rate_percent": win_rate,
+
+        "gross_profit_usdt": gross_profit,
+        "gross_loss_usdt": gross_loss,
+        "profit_factor": profit_factor,
+        "expectancy_per_trade_usdt": expectancy,
+
+        "average_win_usdt": avg_win,
+        "average_loss_usdt": avg_loss,
+        "best_trade_usdt": best_trade,
+        "worst_trade_usdt": worst_trade,
+
+        "longest_win_streak": win_streak,
+        "longest_loss_streak": loss_streak,
+
+        "total_fees_usdt": total_fees,
+        "average_trade_duration_hours": avg_duration,
+
+        "sharpe_ratio": sharpe,
+        "sortino_ratio": sortino,
+        "calmar_ratio": calmar,
+
+        "buy_and_hold_return_percent": bh_return,
+        "yearly_returns_percent": yearly,
+    }
+
+    # ============================================================
+    # PRINT RESULTS
+    # ============================================================
+
+    print("\n" + "=" * 90)
+    print("📈 BACKTEST RESULTS")
+    print("=" * 90)
+
+    print(f"Starting Capital:        ${starting:,.2f}")
+    print(f"Final Capital:           ${final:,.2f}")
+    print(f"Net Profit/Loss:         ${net_profit:,.2f}")
+    print(f"ROI:                     {roi:+.2f}%")
+    print(f"CAGR:                    {cagr_pct:+.2f}%")
+    print(f"Maximum Drawdown:        {dd_pct * 100:.2f}%")
+
+    print("\n--- TRADE STATISTICS ---")
+    print(f"Total Trades:            {len(trades)}")
+    print(f"Winning Trades:          {len(wins)} ({win_rate:.1f}%)")
+    print(f"Losing Trades:           {len(losses)}")
+    print(f"Profit Factor:           {profit_factor:.3f}")
+    print(f"Expectancy / Trade:      ${expectancy:.4f}")
+    print(f"Average Win:             ${avg_win:.4f}")
+    print(f"Average Loss:            ${avg_loss:.4f}")
+    print(f"Best Trade:              ${best_trade:.4f}")
+    print(f"Worst Trade:             ${worst_trade:.4f}")
+    print(f"Longest Win Streak:      {win_streak}")
+    print(f"Longest Loss Streak:     {loss_streak}")
+    print(f"Total Fees:              ${total_fees:.4f}")
+    print(f"Avg Trade Duration:      {avg_duration:.1f} hours")
+
+    print("\n--- RISK-ADJUSTED PERFORMANCE ---")
+    print(f"Sharpe Ratio:            {sharpe:.3f}")
+    print(f"Sortino Ratio:           {sortino:.3f}")
+    print(f"Calmar Ratio:            {calmar:.3f}")
+
+    if bh_return is not None:
+        print("\n--- BENCHMARK ---")
+        print(f"XRP Buy & Hold:          {bh_return:+.2f}%")
+        print(
+            f"Strategy vs B&H:        "
+            f"{roi - bh_return:+.2f} percentage points"
+        )
+
+    if yearly:
+        print("\n--- YEARLY RETURNS ---")
+        for year, ret in yearly.items():
+            print(f"{year}: {ret:+.2f}%")
+
+    print("=" * 90)
+
+    # ============================================================
+    # SAVE RESULTS
+    # ============================================================
+
+    safe_metrics = {}
+    for key, value in metrics.items():
+        if isinstance(value, float) and (
+            math.isnan(value) or math.isinf(value)
+        ):
+            safe_metrics[key] = None
+        else:
+            safe_metrics[key] = value
+
+    output = {
+        "backtest_date_utc": datetime.now(timezone.utc).isoformat(),
+        "config": asdict(config),
+        "metrics": safe_metrics,
+        "trades": trades,
+    }
+
+    json_path = Path("backtest_results.json")
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            output,
+            f,
+            indent=2,
+            allow_nan=False,
+        )
+
+    trades_path = Path("trades.csv")
+    pd.DataFrame(trades).to_csv(
+        trades_path,
+        index=False,
+    )
+
+    equity_path = Path("equity_curve.csv")
+    equity.to_frame().join(
+        drawdown.rename("Drawdown")
+    ).to_csv(equity_path)
+
+    print("\n💾 Files created:")
+    print(f"   {json_path.resolve()}")
+    print(f"   {trades_path.resolve()}")
+    print(f"   {equity_path.resolve()}")
+
+    return {
+        "data": df,
+        "trades": trades,
+        "equity": equity,
+        "drawdown": drawdown,
+        "metrics": metrics,
+    }
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+    config = BacktestConfig(
+        exchange_id="kraken",
+        symbol="XRP/USDT",
+        timeframe="4h",
+        years=3,
+
+        starting_capital=1000.0,
+        position_size_pct=0.10,
+        min_trade_value=5.0,
+
+        stoch_rsi_period=14,
+        k_smooth=3,
+        d_smooth=3,
+
+        oversold=20.0,
+        overbought=80.0,
+
+        take_profit_pct=5.0,
+        stop_loss_pct=3.0,
+
+        fee_pct=0.10,
+        slippage_pct=0.05,
+
+        stop_before_target_if_both_hit=True,
+        include_buy_and_hold=True,
+    )
+
+    results = backtest(config)
